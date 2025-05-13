@@ -1,68 +1,73 @@
-import os  
-import numpy as np 
-import cv2 
+import os
+import numpy as np
+import cv2
 from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import RMSprop
+from tensorflow.keras.models import load_model
+import logging
 
-from keras.layers import Input, Dense 
-from keras.models import Model
- 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Initialization
 is_init = False
-size = -1
-
 label = []
-dictionary = {}
-c = 0
+label_dict = {}
+class_counter = 0
 
-for i in os.listdir():
-	if i.split(".")[-1] == "npy" and not(i.split(".")[0] == "labels"):  
-		if not(is_init):
-			is_init = True 
-			X = np.load(i)
-			size = X.shape[0]
-			y = np.array([i.split('.')[0]]*size).reshape(-1,1)
-		else:
-			X = np.concatenate((X, np.load(i)))
-			y = np.concatenate((y, np.array([i.split('.')[0]]*size).reshape(-1,1)))
+X, y = None, None
 
-		label.append(i.split('.')[0])
-		dictionary[i.split('.')[0]] = c  
-		c = c+1
+# Load all .npy feature files except labels.npy
+for filename in os.listdir():
+    if filename.endswith(".npy") and filename != "labels.npy":
+        emotion_label = os.path.splitext(filename)[0]
+        features = np.load(filename)
 
+        if not is_init:
+            X = features
+            y = np.array([[emotion_label]] * features.shape[0])
+            is_init = True
+        else:
+            X = np.concatenate((X, features), axis=0)
+            y = np.concatenate((y, np.array([[emotion_label]] * features.shape[0])), axis=0)
 
-for i in range(y.shape[0]):
-	y[i, 0] = dictionary[y[i, 0]]
-y = np.array(y, dtype="int32")
+        label.append(emotion_label)
+        label_dict[emotion_label] = class_counter
+        class_counter += 1
+        logging.info(f"Loaded {filename} with label '{emotion_label}'")
 
-###  hello = 0 nope = 1 ---> [1,0] ... [0,1]
+# Map string labels to integers
+y_int = np.vectorize(label_dict.get)(y.flatten()).astype("int32")
+y_cat = to_categorical(y_int)
 
-y = to_categorical(y)
+# Shuffle data (with reproducibility)
+np.random.seed(42)
+shuffle_indices = np.random.permutation(X.shape[0])
+X_shuffled = X[shuffle_indices]
+y_shuffled = y_cat[shuffle_indices]
 
-X_new = X.copy()
-y_new = y.copy()
-counter = 0 
+# Validate input dimensions
+input_shape = X.shape[1]
+if input_shape == 0:
+    raise ValueError("Input feature size is zero. Check the input .npy files.")
 
-cnt = np.arange(X.shape[0])
-np.random.shuffle(cnt)
+# Build model
+input_layer = Input(shape=(input_shape,))
+x = Dense(512, activation="relu")(input_layer)
+x = Dense(256, activation="relu")(x)
+output_layer = Dense(y_cat.shape[1], activation="softmax")(x)
 
-for i in cnt: 
-	X_new[counter] = X[i]
-	y_new[counter] = y[i]
-	counter = counter + 1
+model = Model(inputs=input_layer, outputs=output_layer)
+model.compile(optimizer=RMSprop(), loss="categorical_crossentropy", metrics=["accuracy"])
 
+# Train the model with validation split
+logging.info("Starting model training...")
+model.fit(X_shuffled, y_shuffled, epochs=50, batch_size=32, validation_split=0.2)
+logging.info("Model training completed.")
 
-ip = Input(shape=(X.shape[1]))
-
-m = Dense(512, activation="relu")(ip)
-m = Dense(256, activation="relu")(m)
-
-op = Dense(y.shape[1], activation="softmax")(m) 
-
-model = Model(inputs=ip, outputs=op)
-
-model.compile(optimizer='rmsprop', loss="categorical_crossentropy", metrics=['acc'])
-
-model.fit(X, y, epochs=50)
-
-
+# Save model and labels
 model.save("model.h5")
 np.save("labels.npy", np.array(label))
+logging.info("Model and label mapping saved successfully.")
